@@ -1,64 +1,51 @@
+#Unsupervised Domain Adaptation on Point Cloud via Cross-Modal Knowledge Transfer
+
 ## Introduction
 
-This is the implementation of the zero-shot classification task. 
 
-The zero-shot results on the full test set of ModelNet40 and ScanObjectNN are:
-
-
-| Backbone | ModelNet40 | ScanObjectNN |
-| :---: | :---: | :---: |
-| ResNet50 | 39.38 | 35.32 |
-| ResNet101 | 46.31 | 29.84 |
-| ViT-B/32 | 55.14 | **36.36** |
-| ViT-B/16 | **64.26** | 35.66 |
-
-
+This repo is a PyTorch implementation for **Unsupervised Domain Adaptation on Point Cloud via Cross-Modal Knowledge Transfer(CMKT)**
+[Paper]()
 ## Requirements
+The code has been tested with
 
-### Installation
-Create a conda environment and install dependencies:
-```bash
-conda create -n clipoint python=3.7
-conda activate clipoint
+- Python >= 3.7
+- PyTorch == 1.8.0+cu111
+- torch-scatter == 2.0.7
+- torchsampler == 0.1.2
+- torchvision == 0.9.0+cu111
 
-pip install -r requirements.txt
+Some dependent packages:
 
-# Install the according versions of torch and torchvision
-conda install pytorch torchvision cudatoolkit
+- [PyTorchEMD](https://github.com/daerduoCarey/PyTorchEMD)
 
-# Install the modified dassl library (no need to re-build if the source code is changed)
-# Under CLIPoint/zeroshot_fewshot_cls folder:
-cd Dassl3D/
-python setup.py develop
-
-cd ..
 ```
-
-### Dataset
-Download the official ModelNet40 and ScanobjectNN dataset and put the folder under `data/`. Or you can directly download from this [Google Drive](https://drive.google.com/drive/folders/145flu-CtXPlhJ2nrSUUe7tmUj1DTts7t?usp=sharing). 
+cd PyTorchEMD
+python setup.py install
+```
+## Dataset
+Download the official [PointDA-10](https://drive.google.com/uc?id=1-LfJWL5geF9h0Z2QpdTL0n4lShy8wy2J) dataset and put the folder under `[your_dataroot]/data/`.  
 After download, the directory structure should be:
-```bash
-│zeroshot_cls/
-├──...
-├──data/
-│   ├──modelnet40_ply_hdf5_2048/
-│   ├──scanobjectnn/
-├──...
+
+```
+${ROOT}
+|--PointDA_data
+|  |--modelnet
+|  |--scannet
+|  |--shapenet
 ```
 
-## Get Started
+## Download Pre-trained Model
 
-### Zero-shot Classification
-Edit the running command in `zeroshot_cls.sh`, e.g. config file and output directory. Then run zero-shot classification:
-```bash
-bash zeroshot.sh
+Download the MAE [pre-trained model](https://dl.fbaipublicfiles.com/mae/pretrain/mae_pretrain_vit_base.pth) and put the folder under `pretrained/data/`. 
+
+## Train
+Run GAST on both source and target
 ```
-The dataset can be changed by commenting or uncommenting line 4 and 5, i.e.
-```bash
-#DATASET=modelnet40
-DATASET=scanobjectnn
+python main.py --exp_name 'm2r' --src_dataset modelnet --trgt_dataset scannet --dataroot [your_dataroot] --batch_size 16
+python main_spst.py --exp_name 'm2r' --trgt_dataset scannet --dataroot [your_dataroot] --batch_size 16 --lr 5e-5
 ```
-And the GPU can be changed by modifying line 11 `export CUDA_VISIBLE_DEVICES=7`.
+
+If you want to test with pre-trained CMKT, download it from [here]() and place it at `experiments/'
 
 ## Acknowlegment
-This repo benefits from [PointCLIP](https://github.com/ZrrSkywalker/PointCLIP), [CLIP](https://github.com/openai/CLIP), [SimpleView](https://github.com/princeton-vl/SimpleView) and the excellent codebase [Dassl](https://github.com/KaiyangZhou/Dassl.pytorch). Thanks for their wonderful works.
+This repo benefits from [PointCLIP_V2](https://github.com/yangyangyang127/PointCLIP_V2), [MAE](https://github.com/facebookresearch/mae). Thanks for their wonderful works.
