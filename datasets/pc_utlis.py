@@ -279,7 +279,7 @@ def p_scan(pc, pixel_size=0.017):
     rotated_pc = rotate_point_cloud_3d(pc)
     pc_compress = (rotated_pc[:, 2] + 1) / 2 * pixel * pixel + (rotated_pc[:, 1] + 1) / 2 * pixel
     points_list = [None for i in range((pixel + 5) * (pixel + 5))]
-    pc_compress = pc_compress.astype(np.int)
+    pc_compress = pc_compress.astype('int64')
     for index, point in enumerate(rotated_pc):
         compress_index = pc_compress[index]
         if compress_index > len(points_list):
