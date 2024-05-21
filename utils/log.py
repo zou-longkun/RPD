@@ -4,7 +4,6 @@ import copy
 import torch
 import os
 import sklearn.metrics as metrics
-from datasets.dataloader import label_to_idx
 
 
 class IOStream():
@@ -29,7 +28,7 @@ class IOStream():
         self.f.close()
 
     def save_model(self, model):
-        path = self.path + '/model.pt' + self.args.model
+        path = self.path + '/model.pt'
         best_model = copy.deepcopy(model)
         # torch.save(model.state_dict(), path)
         if len(self.args.gpus) > 1:
@@ -38,7 +37,7 @@ class IOStream():
             torch.save(model.state_dict(), path)
         return best_model
 
-    def save_conf_mat(self, conf_matrix, fname, domain_set):
+    def save_conf_mat(self, conf_matrix, label_to_idx, fname, domain_set):
         df = pd.DataFrame(conf_matrix, columns=list(label_to_idx.keys()), index=list(label_to_idx.keys()))
         fname = domain_set + "_" + fname
         df.to_csv(self.path + "/" + fname)

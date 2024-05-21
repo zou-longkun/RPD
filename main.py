@@ -173,9 +173,8 @@ class Trainer:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DA on Point Clouds')
-    parser.add_argument('--exp_name', type=str, default='m2r', help='Name of the experiment')
     parser.add_argument('--out_path', type=str, default='./experiments', help='log folder path')
-    parser.add_argument('--dataroot', type=str, default='/cluster/sc_download/zhuwanru', metavar='N', help='data path')
+    parser.add_argument('--dataroot', type=str, default='..', metavar='N', help='data path')
     parser.add_argument('--src_dataset', type=str, default='modelnet', choices=['modelnet', 'shapenet', 'scannet'])
     parser.add_argument('--trgt_dataset', type=str, default='scannet', choices=['modelnet', 'shapenet', 'scannet'])
     parser.add_argument('--epochs', type=int, default=400, help='number of episode to train')
@@ -191,7 +190,23 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    if args.src_dataset == 'modelnet' and args.trgt_dataset == 'shapenet':
+        args.exp_name = 'm2s'
+    elif args.src_dataset == 'modelnet' and args.trgt_dataset == 'scannet':
+        args.exp_name = 'm2r'
+    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'modelnet':
+        args.exp_name = 's2m'
+    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'scannet':
+        args.exp_name = 's2r'
+    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'modelnet':
+        args.exp_name = 'r2m'
+    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'shapenet':
+        args.exp_name = 'r2s'
+    else:
+        args.exp_name = 'other'
+
     io = log.IOStream(args)
+    io.cprint(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)  # to get the same point choice in ModelNet and ScanNet leave it fixed

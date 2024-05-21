@@ -36,7 +36,7 @@ def load_mae_to_cpu():
     return img_model.eval(), pc_model
 
 
-def select_target_by_conf(io, trgt_train_loader, pc_model=None, img_model=None, trainer=None):
+def select_target_by_conf(io, trgt_train_loader, threshold,  pc_model=None, img_model=None, trainer=None):
     pc_list = []
     pc_patches_list = []
     pseudo_label_list = []
@@ -44,9 +44,9 @@ def select_target_by_conf(io, trgt_train_loader, pc_model=None, img_model=None, 
     sfm = torch.nn.Softmax(dim=1)
     pc_model.eval()
     img_model.eval()
-    thd_0 = args.thd_low
-    thd_1 = args.thd_high
-    threshold = {0: thd_0, 1: thd_1, 2: thd_1, 3: thd_0, 4: thd_1, 5: thd_1, 6: thd_1, 7: thd_1, 8: thd_1, 9: thd_1}
+    # thd_l = args.thd_low
+    # thd_h = args.thd_high
+    # threshold = {0: thd_l, 1: thd_h, 2: thd_h, 3: thd_l, 4: thd_h, 5: thd_h, 6: thd_h, 7: thd_h, 8: thd_h, 9: thd_h}
     with torch.no_grad():
         for data in tqdm(trgt_train_loader):
             pc, pc_patches, label = data[0].cuda(), data[1].cuda(), data[2].cuda()
@@ -55,8 +55,8 @@ def select_target_by_conf(io, trgt_train_loader, pc_model=None, img_model=None, 
             mask = torch.max(cls_conf, 1)
             index = 0
             for i in mask[0]:
-                thd = threshold.get(mask[1][index].item())
-                if i > thd:
+                # thd = threshold.get(mask[1][index].item())
+                if i > threshold:
                     pc_list.append(pc[index].cpu().numpy())
                     pc_patches_list.append(pc_patches[index].cpu().numpy())
                     pseudo_label_list.append(mask[1][index].cpu().numpy())
@@ -83,7 +83,7 @@ class DataLoadST(Dataset):
         pointcloud = np.copy(self.pc[item])
         pc_patched = np.copy(self.pc_patches[item])
         label = np.copy(self.label[item])
-        return (pointcloud, pc_patched, label, item)
+        return pointcloud, pc_patched, label, item
 
     def __len__(self):
         return len(self.pc)
@@ -184,10 +184,10 @@ class Trainer:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DA on Point Clouds')
-    parser.add_argument('--exp_name', type=str, default='SPST', help='Name of the experiment')
+    parser.add_argument('--exp_name', type=str, default='spst', help='Name of the experiment')
     parser.add_argument('--in_path', type=str, default='./experiments', help='log folder path')
-    parser.add_argument('--out_path', type=str, default='/experiments', help='log folder path')
-    parser.add_argument('--dataroot', type=str, default='/dataset', metavar='N', help='data path')
+    parser.add_argument('--out_path', type=str, default='./experiments', help='log folder path')
+    parser.add_argument('--dataroot', type=str, default='..', metavar='N', help='data path')
     parser.add_argument('--src_dataset', type=str, default='modelnet', choices=['modelnet', 'shapenet', 'scannet'])
     parser.add_argument('--trgt_dataset', type=str, default='scannet', choices=['modelnet', 'shapenet', 'scannet'])
     parser.add_argument('--round', type=int, default=5, help='number of episode to train')
@@ -210,7 +210,37 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    if args.src_dataset == 'modelnet' and args.trgt_dataset == 'shapenet':
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2s", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2s", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
+    elif args.src_dataset == 'modelnet' and args.trgt_dataset == 'scannet':
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2r", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2r", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2r")
+    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'modelnet':
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2m", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2m", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "s2m")
+    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'scannet':
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2r", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2r", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "s2r")
+    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'modelnet':
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2m", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2m", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "r2m")
+    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'shapenet':
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2s", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2s", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "r2s")
+    else:
+        img_model_dir = ''
+        pc_model_dir = ''
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "other")
+
     io = log.IOStream(args)
+    io.cprint(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -226,42 +256,6 @@ if __name__ == '__main__':
         torch.backends.cudnn.deterministic = True
     else:
         io.cprint('Using CPU')
-
-    if args.src_dataset == 'modelnet' and args.trgt_dataset == 'shapenet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2s", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2s", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'modelnet' and args.trgt_dataset == 'scannet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2r", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2r", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'modelnet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2m", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2m", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'scannet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2r", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2r", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'modelnet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2m", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2m", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'shapenet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2s", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2s", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    else:
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = ''
-        pc_model_dir = ''
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "other")
 
     trgt_dataset = args.trgt_dataset
     data_func = {'modelnet': ModelNet, 'scannet': ScanNet, 'shapenet': ShapeNet}
@@ -304,17 +298,16 @@ if __name__ == '__main__':
     epoch_it = -1
     batch_it = -1
     src_metric_val_best = 0.0
-
-    trgt_select_data = select_target_by_conf(io, trgt_train_loader, pc_model, img_model, trainer)
+    threshold = args.thd
+    trgt_select_data = select_target_by_conf(io, trgt_train_loader, threshold, pc_model, img_model, trainer)
     trgt_new_data = DataLoadST(trgt_select_data)
     train_new_loader = torch.utils.data.DataLoader(trgt_new_data, sampler=ImbalancedDatasetSampler(trgt_new_data),
                                                    num_workers=4, batch_size=args.batch_size, drop_last=True)
 
     # trgt_metric_test = trainer.model_eval_img_pc(trgt_test_loader, io)
 
-    threshold = args.thd
     for r in range(args.round):
-        trgt_select_data = select_target_by_conf(io, trgt_train_loader, args.thd, pc_model, img_model, trainer)
+        trgt_select_data = select_target_by_conf(io, trgt_train_loader, threshold, pc_model, img_model, trainer)
         trgt_new_data = DataLoadST(trgt_select_data)
         train_new_loader = torch.utils.data.DataLoader(trgt_new_data, sampler=ImbalancedDatasetSampler(trgt_new_data),
                                                        num_workers=4, batch_size=args.batch_size, drop_last=True)

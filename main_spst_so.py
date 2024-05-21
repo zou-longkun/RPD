@@ -211,10 +211,10 @@ class Trainer:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DA on Point Clouds')
-    parser.add_argument('--exp_name', type=str, default='SPST_SO', help='Name of the experiment')
-    parser.add_argument('--in_path', type=str, default='experiments', help='log folder path')
-    parser.add_argument('--out_path', type=str, default='experiments', help='log folder path')
-    parser.add_argument('--dataroot', type=str, default='../..', metavar='N', help='data path')
+    parser.add_argument('--exp_name', type=str, default='spst_so', help='Name of the experiment')
+    parser.add_argument('--in_path', type=str, default='./experiments', help='log folder path')
+    parser.add_argument('--out_path', type=str, default='./experiments', help='log folder path')
+    parser.add_argument('--dataroot', type=str, default='..', metavar='N', help='data path')
     parser.add_argument('--src_dataset', type=str, default='modelnet11', choices=['modelnet11', 'shapenet9'])
     parser.add_argument('--trgt_dataset', type=str, default='scanobjectnn11', choices=['scanobjectnn11', 'scanobjectnn9'])
     parser.add_argument('--round', type=int, default=5, help='number of episode to train')
@@ -237,26 +237,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    io = log.IOStream(args)
-    io.cprint(args.thd_high)
-    io.cprint(args.lr)
-    io.cprint(args.thd_low)
-
-    random.seed(1)
-    np.random.seed(1)  # to get the same point choice in ModelNet and ScanNet leave it fixed
-    torch.manual_seed(args.seed)
-    args.cuda = (args.gpus[0] >= 0) and torch.cuda.is_available()
-    device = torch.device("cuda:" + str(args.gpus[0]) if args.cuda else "cpu")
-    if args.cuda:
-        io.cprint('Using GPUs ' + str(args.gpus) + ',' + ' from ' +
-                  str(torch.cuda.device_count()) + ' devices available')
-        torch.cuda.manual_seed_all(args.seed)
-        torch.backends.cudnn.enabled = False
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
-    else:
-        io.cprint('Using CPU')
-
     if args.src_dataset == 'modelnet11' and args.trgt_dataset == 'scanobjectnn11':
         label_to_idx = label_to_idx2
         args.num_cls = 11
@@ -273,7 +253,25 @@ if __name__ == '__main__':
     else:
         img_model_dir = ''
         pc_model_dir = ''
-        io.cprint('Setting Error!')
+        print('Setting Error!')
+
+    io = log.IOStream(args)
+    io.cprint(args)
+
+    random.seed(1)
+    np.random.seed(1)  # to get the same point choice in ModelNet and ScanNet leave it fixed
+    torch.manual_seed(args.seed)
+    args.cuda = (args.gpus[0] >= 0) and torch.cuda.is_available()
+    device = torch.device("cuda:" + str(args.gpus[0]) if args.cuda else "cpu")
+    if args.cuda:
+        io.cprint('Using GPUs ' + str(args.gpus) + ',' + ' from ' +
+                  str(torch.cuda.device_count()) + ' devices available')
+        torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.enabled = False
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    else:
+        io.cprint('Using CPU')
 
     src_dataset = args.src_dataset
     trgt_dataset = args.trgt_dataset
