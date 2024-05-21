@@ -1,9 +1,9 @@
-#Unsupervised Domain Adaptation on Point Cloud via Cross-Modal Knowledge Transfer
+#Boosting Cross-Domain Point Classification via Distilling Relational Priors from 2D Transformers
 
 ## Introduction
 
 
-This repo is a PyTorch implementation for **Unsupervised Domain Adaptation on Point Cloud via Cross-Modal Knowledge Transfer(CMKT)**
+This repo is a PyTorch implementation for **Boosting Cross-Domain Point Classification via Distilling Relational Priors from 2D Transformers**
 [Paper]()
 ## Requirements
 The code has been tested with
