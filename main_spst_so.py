@@ -72,7 +72,7 @@ def select_target_by_conf(trgt_train_loader, threshold, pc_model=None, img_model
     # threshold = {0: thd_1, 1: thd_0, 2: thd_1, 3: thd_1, 4: thd_1, 5: thd_1, 6: thd_1, 7: thd_0, 8: thd_1, 9: thd_1}
     with torch.no_grad():
         
-        for data in trgt_train_loader:
+        for data in tqdm(trgt_train_loader):
             pc, pc_patches, label = data[0].cuda(), data[1].cuda(), data[2].cuda()
             logits_img, logits_pc = trainer.model_forward(pc, pc_patches, label, mode='eval')
             # logits = logits_img + logits_pc
