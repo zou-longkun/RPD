@@ -3,7 +3,7 @@ import numpy
 import random
 import os
 import sklearn.metrics as metrics
-from datasets.dataloader import ModelNet, ScanNet, ShapeNet
+from datasets.dataloader import ModelNet, ScanNet, ShapeNet, label_to_idx
 import numpy as np
 from torch.utils.data.sampler import SubsetRandomSampler
 import torch.optim as optim
@@ -167,6 +167,7 @@ class Trainer:
             pred = numpy.concatenate(pred_list)
             acc = metrics.accuracy_score(true, pred)
             avg_per_class_acc = metrics.balanced_accuracy_score(true, pred)
+            conf_mat = metrics.confusion_matrix(true, pred, labels=list(label_to_idx.values())).astype(int)
             io.cprint("Evaluate - acc: %.4f, avg acc: %.4f" % (acc, avg_per_class_acc))
 
             pred_img = numpy.concatenate(pred_list_img)
