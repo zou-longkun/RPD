@@ -299,10 +299,6 @@ if __name__ == '__main__':
     batch_it = -1
     src_metric_val_best = 0.0
     threshold = args.thd
-    trgt_select_data = select_target_by_conf(io, trgt_train_loader, threshold, pc_model, img_model, trainer)
-    trgt_new_data = DataLoadST(trgt_select_data)
-    train_new_loader = torch.utils.data.DataLoader(trgt_new_data, sampler=ImbalancedDatasetSampler(trgt_new_data),
-                                                   num_workers=4, batch_size=args.batch_size, drop_last=True)
 
     # trgt_metric_test = trainer.model_eval_img_pc(trgt_test_loader, io)
 
