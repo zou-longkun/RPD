@@ -1,9 +1,8 @@
 import torch
 import numpy
 import random
-import os
 import sklearn.metrics as metrics
-from datasets.dataloader import ModelNet, ScanNet, ShapeNet
+from datasets.dataloader_so import ModelNet11, ScanObjectNet11, ShapeNet9, ScanObjectNet9, label_to_idx1, label_to_idx2
 import numpy as np
 from torch.utils.data.sampler import SubsetRandomSampler
 import torch.optim as optim
@@ -15,13 +14,37 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import argparse
 from utils import log, checkpoints
 from tqdm import tqdm
-from trainers import model
+from trainers import model_so
 from utils.pos_embed import interpolate_pos_embed
+import os
 
 
-def load_mae_to_cpu():
-    img_model = model.__dict__['mae_vit_base_patch16_img'](norm_pix_loss=False)
-    pc_model = model.__dict__['mae_vit_base_patch16_pc'](norm_pix_loss=False)
+def split_set(dataset, domain, set_type="source"):
+    """
+    Input:
+        dataset
+        domain - modelnet/shapenet/scannet
+        type_set - source/target
+    output:
+        train_sampler, valid_sampler
+    """
+    train_indices = dataset.train_ind
+    val_indices = dataset.val_ind
+    unique, counts = np.unique(dataset.label[train_indices], return_counts=True)
+    io.cprint("Occurrences count of classes in " + set_type + " " + domain +
+              " train part: " + str(dict(zip(unique, counts))))
+    unique, counts = np.unique(dataset.label[val_indices], return_counts=True)
+    io.cprint("Occurrences count of classes in " + set_type + " " + domain +
+              " validation part: " + str(dict(zip(unique, counts))))
+    # Creating PT data samplers and loaders:
+    train_sampler = SubsetRandomSampler(train_indices)
+    valid_sampler = SubsetRandomSampler(val_indices)
+    return train_sampler, valid_sampler
+
+
+def load_mae_to_cpu(args):
+    img_model = model_so.__dict__['mae_vit_base_patch16_img'](norm_pix_loss=False, args=args)
+    pc_model = model_so.__dict__['mae_vit_base_patch16_pc'](norm_pix_loss=False, args=args)
 
     checkpoint = torch.load('./pretrained/mae_finetuned_vit_base.pth', map_location='cpu')
     checkpoint_model = checkpoint['model']
@@ -36,7 +59,7 @@ def load_mae_to_cpu():
     return img_model.eval(), pc_model
 
 
-def select_target_by_conf(io, trgt_train_loader, pc_model=None, img_model=None, trainer=None):
+def select_target_by_conf(trgt_train_loader, threshold, pc_model=None, img_model=None, trainer=None):
     pc_list = []
     pc_patches_list = []
     pseudo_label_list = []
@@ -44,27 +67,31 @@ def select_target_by_conf(io, trgt_train_loader, pc_model=None, img_model=None, 
     sfm = torch.nn.Softmax(dim=1)
     pc_model.eval()
     img_model.eval()
-    thd_0 = args.thd_low
-    thd_1 = args.thd_high
-    threshold = {0: thd_0, 1: thd_1, 2: thd_1, 3: thd_0, 4: thd_1, 5: thd_1, 6: thd_1, 7: thd_1, 8: thd_1, 9: thd_1}
+    # thd_0 = args.thd_low
+    # thd_1 = args.thd_high
+    # threshold = {0: thd_1, 1: thd_0, 2: thd_1, 3: thd_1, 4: thd_1, 5: thd_1, 6: thd_1, 7: thd_0, 8: thd_1, 9: thd_1}
     with torch.no_grad():
-        for data in tqdm(trgt_train_loader):
+        
+        for data in trgt_train_loader:
             pc, pc_patches, label = data[0].cuda(), data[1].cuda(), data[2].cuda()
             logits_img, logits_pc = trainer.model_forward(pc, pc_patches, label, mode='eval')
-            cls_conf = (sfm(logits_img) + sfm(logits_pc)) / 2
-            mask = torch.max(cls_conf, 1)
+            # logits = logits_img + logits_pc
+            # cls_conf = sfm(logits)
+            cls_conf = (sfm(logits_img) + sfm(logits_pc))/2
+            mask = torch.max(cls_conf, 1)  # 2 * b
             index = 0
             for i in mask[0]:
-                thd = threshold.get(mask[1][index].item())
-                if i > thd:
+                # thd = threshold.get(mask[1][index].item())
+                if i > threshold:
+                    # print(1)
                     pc_list.append(pc[index].cpu().numpy())
                     pc_patches_list.append(pc_patches[index].cpu().numpy())
                     pseudo_label_list.append(mask[1][index].cpu().numpy())
                     gt_list.append(label[index].cpu().numpy())
                 index += 1
-        io.cprint('pseudo label acc: '
-                  + str(round(sum(np.array(pseudo_label_list) == np.array(gt_list)) / len(pc_list), 3)))
-        io.cprint('data num: ' + str(len(pc_list)))
+        print('number of selected examples', len(pc_list))
+        print('pseudo label acc: ', round(sum(np.array(pseudo_label_list) == np.array(gt_list)) / len(pc_list), 3))
+        print('data num: ', len(pc_list))
     return np.array(pc_list), np.array(pc_patches_list), np.array(pseudo_label_list), np.array(gt_list)
 
 
@@ -83,7 +110,7 @@ class DataLoadST(Dataset):
         pointcloud = np.copy(self.pc[item])
         pc_patched = np.copy(self.pc_patches[item])
         label = np.copy(self.label[item])
-        return (pointcloud, pc_patched, label, item)
+        return pointcloud, pc_patched, label, item
 
     def __len__(self):
         return len(self.pc)
@@ -119,11 +146,10 @@ class Trainer:
 
         # Image features
         if mode == 'train':
+            # self.pc_model.eval()
             loss_ce_img, latent_all_img, logits_img = self.img_model(images, label, mode)
-            loss_re, loss_ce_pc, loss_align = self.pc_model(pc_patches, latent_all_img, logits_img.detach(), label,
-                                                            mode)
-            loss_ce = loss_ce_img + loss_ce_pc
-            return loss_re, loss_ce, loss_align
+            loss_re, loss_ce_pc, loss_align = self.pc_model(pc_patches, latent_all_img, logits_img.detach(), label, mode)
+            return loss_re, loss_ce_img, loss_ce_pc, loss_align
         else:
             logits_img, _ = self.img_model(images, label, mode)
             logits_pc, _, _ = self.pc_model(pc_patches, None, logits_img, label, mode)
@@ -135,12 +161,12 @@ class Trainer:
         self.pc_model.train()
         self.optimizer_pc.zero_grad()
         pc, pc_patch, label = data[0].cuda(), data[1].cuda(), data[2].cuda()
-        loss_re, loss_ce, loss_align = self.model_forward(pc, pc_patch, label, mode='train')
-        loss = loss_re + loss_ce + loss_align
+        loss_re, loss_ce_img, loss_ce_pc, loss_align = self.model_forward(pc, pc_patch, label, mode='train')
+        loss = loss_re + loss_ce_img + loss_ce_pc + loss_align
         loss.backward()
         self.optimizer_img.step()
         self.optimizer_pc.step()
-        return loss_ce.item(), loss_re.item(), loss_align.item()
+        return loss_ce_img.item(), loss_ce_pc.item(), loss_re.item(), loss_align.item()
 
     def model_eval_img_pc(self, data_loader, io):
         self.pc_model.eval()
@@ -167,6 +193,7 @@ class Trainer:
             pred = numpy.concatenate(pred_list)
             acc = metrics.accuracy_score(true, pred)
             avg_per_class_acc = metrics.balanced_accuracy_score(true, pred)
+            conf_mat = metrics.confusion_matrix(true, pred, labels=list(label_to_idx.values())).astype(int)
             io.cprint("Evaluate - acc: %.4f, avg acc: %.4f" % (acc, avg_per_class_acc))
 
             pred_img = numpy.concatenate(pred_list_img)
@@ -179,17 +206,17 @@ class Trainer:
             avg_per_class_acc_pc = metrics.balanced_accuracy_score(true, pred_pc)
             io.cprint("Evaluate pc - acc: %.4f, avg pc acc: %.4f" % (acc_pc, avg_per_class_acc_pc))
 
-            return acc
+            return acc, conf_mat
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DA on Point Clouds')
-    parser.add_argument('--exp_name', type=str, default='SPST', help='Name of the experiment')
-    parser.add_argument('--in_path', type=str, default='./experiments', help='log folder path')
-    parser.add_argument('--out_path', type=str, default='/experiments', help='log folder path')
-    parser.add_argument('--dataroot', type=str, default='/dataset', metavar='N', help='data path')
-    parser.add_argument('--src_dataset', type=str, default='modelnet', choices=['modelnet', 'shapenet', 'scannet'])
-    parser.add_argument('--trgt_dataset', type=str, default='scannet', choices=['modelnet', 'shapenet', 'scannet'])
+    parser.add_argument('--exp_name', type=str, default='SPST_SO', help='Name of the experiment')
+    parser.add_argument('--in_path', type=str, default='experiments', help='log folder path')
+    parser.add_argument('--out_path', type=str, default='experiments', help='log folder path')
+    parser.add_argument('--dataroot', type=str, default='../..', metavar='N', help='data path')
+    parser.add_argument('--src_dataset', type=str, default='modelnet11', choices=['modelnet11', 'shapenet9'])
+    parser.add_argument('--trgt_dataset', type=str, default='scanobjectnn11', choices=['scanobjectnn11', 'scanobjectnn9'])
     parser.add_argument('--round', type=int, default=5, help='number of episode to train')
     parser.add_argument('--epochs', type=int, default=1, help='number of epoch to train')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
@@ -211,9 +238,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     io = log.IOStream(args)
+    io.cprint(args.thd_high)
+    io.cprint(args.lr)
+    io.cprint(args.thd_low)
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    random.seed(1)
+    np.random.seed(1)  # to get the same point choice in ModelNet and ScanNet leave it fixed
     torch.manual_seed(args.seed)
     args.cuda = (args.gpus[0] >= 0) and torch.cuda.is_available()
     device = torch.device("cuda:" + str(args.gpus[0]) if args.cuda else "cpu")
@@ -227,68 +257,61 @@ if __name__ == '__main__':
     else:
         io.cprint('Using CPU')
 
-    if args.src_dataset == 'modelnet' and args.trgt_dataset == 'shapenet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2s", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2s", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'modelnet' and args.trgt_dataset == 'scannet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2r", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2r", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'modelnet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2m", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2m", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'shapenet' and args.trgt_dataset == 'scannet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2r", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2r", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'modelnet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2m", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2m", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
-    elif args.src_dataset == 'scannet' and args.trgt_dataset == 'shapenet':
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
-        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2s", "model_img_new.pt")
-        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "r2s", "model_pc_new.pt")
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2s")
+    if args.src_dataset == 'modelnet11' and args.trgt_dataset == 'scanobjectnn11':
+        label_to_idx = label_to_idx2
+        args.num_cls = 11
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2so", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "m2so", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "m2so")
+    elif args.src_dataset == 'shapenet9' and args.trgt_dataset == 'scanobjectnn9':
+        label_to_idx = label_to_idx1
+        args.num_cls = 9
+        args.thd = 0.7
+        img_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2so", "model_img_new.pt")
+        pc_model_dir = os.path.join(os.path.abspath('.'), args.in_path, "s2so", "model_pc_new.pt")
+        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "s2so")
     else:
-        io.cprint(args.src_dataset + '-->' + args.trgt_dataset)
         img_model_dir = ''
         pc_model_dir = ''
-        args.out_path = os.path.join(os.path.abspath('.'), args.out_path, "other")
+        io.cprint('Setting Error!')
 
+    src_dataset = args.src_dataset
     trgt_dataset = args.trgt_dataset
-    data_func = {'modelnet': ModelNet, 'scannet': ScanNet, 'shapenet': ShapeNet}
+    data_func = {'modelnet11': ModelNet11, 'scanobjectnn11': ScanObjectNet11,
+                 'shapenet9': ShapeNet9, 'scanobjectnn9': ScanObjectNet9}
 
+    src_train_dataset = data_func[src_dataset](io, args.dataroot, 'train')
+    src_test_dataset = data_func[src_dataset](io, args.dataroot, 'test')
     trgt_train_dataset = data_func[trgt_dataset](io, args.dataroot, 'train')
     trgt_test_dataset = data_func[trgt_dataset](io, args.dataroot, 'test')
+
+    src_train_sampler, src_valid_sampler = split_set(src_train_dataset, src_dataset, "source")
+    src_train_loader = torch.utils.data.DataLoader(src_train_dataset, batch_size=args.batch_size, num_workers=4,
+                                                   sampler=src_train_sampler, drop_last=True)
+    src_val_loader = torch.utils.data.DataLoader(src_train_dataset, batch_size=args.batch_size, num_workers=4,
+                                                 sampler=src_valid_sampler)
+    src_test_loader = torch.utils.data.DataLoader(src_test_dataset, batch_size=args.batch_size, num_workers=4)
 
     trgt_train_loader = torch.utils.data.DataLoader(trgt_train_dataset, batch_size=args.batch_size, num_workers=4,
                                                     drop_last=True)
     trgt_test_loader = torch.utils.data.DataLoader(trgt_test_dataset, batch_size=args.batch_size, num_workers=4)
 
-    img_model, pc_model = load_mae_to_cpu()
+    img_model, pc_model = load_mae_to_cpu(args)
 
     need_frozend_layers = ['cls_token', 'pos_embed', 'patch_embed.proj.weight', 'patch_embed.proj.bias']
     for param in img_model.named_parameters():
-        if param[0] in need_frozend_layers or (param[0].split('.')[0] == 'blocks' and int(param[0].split('.')[1]) <= 8):
+        if param[0] in need_frozend_layers or (param[0].split('.')[0] == 'blocks'and int(param[0].split('.')[1]) <= 8):
             param[1].requires_grad = False
     for param in pc_model.named_parameters():
-        if param[0].split('.')[0] == 'blocks' and int(param[0].split('.')[1]) <= 8:
+        if param[0].split('.')[0] == 'blocks'and int(param[0].split('.')[1]) <= 8:
             param[1].requires_grad = False
 
     img_model = img_model.to(device)
     pc_model = pc_model.to(device)
     optimizer_img = optim.Adam(filter(lambda p: p.requires_grad, img_model.parameters()), lr=args.lr, weight_decay=args.wd)
-    scheduler_img = CosineAnnealingLR(optimizer_img, args.epochs)
+    scheduler_img = CosineAnnealingLR(optimizer_img, args.epochs * args.round)
     optimizer_pc = optim.Adam(filter(lambda p: p.requires_grad, pc_model.parameters()), lr=args.lr, weight_decay=args.wd)
-    scheduler_pc = CosineAnnealingLR(optimizer_pc, args.epochs)
+    scheduler_pc = CosineAnnealingLR(optimizer_pc, args.epochs * args.round)
     trainer = Trainer(img_model, pc_model, optimizer_img, optimizer_pc, device=device)
 
     checkpoint_dir = args.out_path + '/' + args.exp_name
@@ -305,23 +328,19 @@ if __name__ == '__main__':
     batch_it = -1
     src_metric_val_best = 0.0
 
-    trgt_select_data = select_target_by_conf(io, trgt_train_loader, pc_model, img_model, trainer)
-    trgt_new_data = DataLoadST(trgt_select_data)
-    train_new_loader = torch.utils.data.DataLoader(trgt_new_data, sampler=ImbalancedDatasetSampler(trgt_new_data),
-                                                   num_workers=4, batch_size=args.batch_size, drop_last=True)
-
     # trgt_metric_test = trainer.model_eval_img_pc(trgt_test_loader, io)
 
     threshold = args.thd
     for r in range(args.round):
-        trgt_select_data = select_target_by_conf(io, trgt_train_loader, args.thd, pc_model, img_model, trainer)
+        trgt_select_data = select_target_by_conf(trgt_train_loader, args.thd, pc_model, img_model, trainer)
         trgt_new_data = DataLoadST(trgt_select_data)
         train_new_loader = torch.utils.data.DataLoader(trgt_new_data, sampler=ImbalancedDatasetSampler(trgt_new_data),
                                                        num_workers=4, batch_size=args.batch_size, drop_last=True)
         threshold += args.epsilon
 
         for i in range(args.epochs):
-            trgt_loss_ce_sum = 0.0
+            trgt_loss_ce_img_sum = 0.0
+            trgt_loss_ce_pc_sum = 0.0
             trgt_loss_re_sum = 0.0
             trgt_loss_align_sum = 0.0
             it = 0
@@ -329,21 +348,21 @@ if __name__ == '__main__':
             for trgt_batch in tqdm(train_new_loader):
                 batch_it += 1
                 it += 1
-                loss_ce, loss_re, loss_align = trainer.model_train(trgt_batch)
-                trgt_loss_ce_sum += loss_ce
+                loss_ce_img, loss_ce_pc, loss_re, loss_align = trainer.model_train(trgt_batch)
+                trgt_loss_ce_img_sum += loss_ce_img
+                trgt_loss_ce_pc_sum += loss_ce_pc
                 trgt_loss_re_sum += loss_re
                 trgt_loss_align_sum += loss_align
             scheduler_img.step()
             scheduler_pc.step()
 
             io.cprint('lr_rate=%.9f' % scheduler_img.get_last_lr()[0])
-            io.cprint('Train -TRT - [Epoch %02d], loss_re=%.4f, loss_ce=%.4f, loss_align=%.4f' %
-                      (epoch_it, trgt_loss_re_sum / it, trgt_loss_ce_sum / it, trgt_loss_align_sum / it))
+            io.cprint('Train -TRT - [Epoch %02d], loss_re=%.4f, loss_ce_img=%.4f, loss_ce_pc=%.4f, loss_align=%.4f' %
+                      (epoch_it, trgt_loss_re_sum / it, trgt_loss_ce_img_sum / it,
+                       trgt_loss_ce_pc_sum / it, trgt_loss_align_sum / it))
 
             # # Run validation
             # src_metric_val = trainer.model_eval(src_val_loader, io)
             trgt_metric_test, trgt_conf_mat = trainer.model_eval_img_pc(trgt_test_loader, io)
             io.cprint("Test confusion matrix:")
             io.cprint('\n' + str(trgt_conf_mat))
-            checkpoint_io_img.save('model_img_spst.pt', epoch_it=epoch_it, batch_it=batch_it)
-            checkpoint_io_pc.save('model_pc_spst.pt', epoch_it=epoch_it, batch_it=batch_it)

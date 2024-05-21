@@ -12,8 +12,7 @@ class CheckpointIO(object):
     Args:
         checkpoint_dir (str): path where checkpoints are saved
     """
-    def __init__(self, args, **kwargs):
-        checkpoint_dir = args.out_path + '/' + args.exp_name
+    def __init__(self, checkpoint_dir, **kwargs):
         self.module_dict = kwargs
         self.checkpoint_dir = checkpoint_dir
         if not os.path.exists(checkpoint_dir):

@@ -6,6 +6,12 @@ from timm.models.vision_transformer import PatchEmbed, Block
 from trainers.cross_block import CrossBlock
 from utils.pos_embed import get_2d_sincos_pos_embed
 from utils import emd
+import numpy
+
+
+def cos_sim(x1, x2):
+    scores = torch.acos(torch.cosine_similarity(x1, x2, dim=1)) / numpy.pi
+    return scores.mean()
 
 
 def knn(x, k):
@@ -44,14 +50,123 @@ def get_graph_feature(x, k=20, idx=None, dim9=False):
     return feature  # (batch_size, 2*num_dims, num_points, k)
 
 
+# Position Encoding with cos-sin function
+class PosE(nn.Module):
+    def __init__(self, in_dim=3, out_dim=72, alpha=1000, beta=100):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.alpha, self.beta = alpha, beta
+
+    def forward(self, x):
+        B, C, N = x.shape
+        feat_dim = self.out_dim // (self.in_dim * 2)  # 12
+
+        feat_range = torch.arange(feat_dim).float().cuda()  # [0, 1, ..., 11]
+        dim_embed = torch.pow(self.alpha, feat_range / feat_dim)
+        div_embed = torch.div(self.beta * x.unsqueeze(-1), dim_embed)  # [B, 3, N, 12])
+
+        sin_embed = torch.sin(div_embed)  # [B, 3, N, 12])
+        cos_embed = torch.cos(div_embed)  # [B, 3, N, 12])
+        # position_embed = torch.cat([sin_embed, cos_embed], -1)  # [B, 3, N, 24])
+        # position_embed = position_embed.permute(0, 1, 3, 2).contiguous()  # [B, 3, 24, N]
+        # position_embed = position_embed.view(B, self.out_dim, N)  # [B, 72, N]
+
+        position_embed = torch.stack([sin_embed, cos_embed], dim=4).flatten(3)
+        position_embed = position_embed.permute(0, 1, 3, 2).reshape(B, self.out_dim, N)
+
+        # # Weigh
+        # x = torch.cat((x, position_embed), dim=1)  # [B, 72+3, N]
+
+        return position_embed
+
+
+class PosE_Initial(nn.Module):
+    def __init__(self, in_dim, out_dim, alpha, beta):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.alpha, self.beta = alpha, beta
+
+    def forward(self, xyz):
+        B, _, N = xyz.shape  
+        # print(xyz.shape)  
+        feat_dim = self.out_dim // (self.in_dim * 2)
+        
+        feat_range = torch.arange(feat_dim).float().cuda()     
+        dim_embed = torch.pow(self.alpha, feat_range / feat_dim)
+        div_embed = torch.div(self.beta * xyz.unsqueeze(-1), dim_embed)
+
+        sin_embed = torch.sin(div_embed)
+        cos_embed = torch.cos(div_embed)
+        # print(cos_embed.shape)
+        position_embed = torch.stack([sin_embed, cos_embed], dim=4).flatten(3)
+        # print(position_embed.permute(0, 1, 3, 2).shape)
+        position_embed = position_embed.permute(0, 1, 3, 2).reshape(B, self.out_dim, N)
+        
+        return position_embed
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2, weight=None):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.weight = weight
+
+    def forward(self, inputs, targets):
+        ce_loss = nn.CrossEntropyLoss(weight=self.weight)(inputs, targets)  # 使用交叉熵损失函数计算基础损失
+        pt = torch.exp(-ce_loss)  # 计算预测的概率
+        focal_loss = (1 - pt) ** self.gamma * ce_loss  # 根据Focal Loss公式计算Focal Loss
+        # focal_loss = (1 / pt) ** self.gamma * ce_loss
+        return focal_loss
+
+
+class Pointnet(nn.Module):
+    def __init__(self, channel):
+        super(Pointnet, self).__init__()
+        # self.raw_point_embed_0 = PosE_Initial(3, 36, 100, 1000)
+        self.raw_point_embed_1 = PosE_Initial(3, 72, 100, 1000)
+        # self.raw_point_embed_2 = PosE_Initial(3, 144, 100, 1000)
+        self.conv1 = torch.nn.Conv1d(75, 512, 1)
+        self.conv2 = torch.nn.Conv1d(512, 768, 1)
+        # self.conv3 = torch.nn.Conv1d(768, 768, 1)
+
+        self.relu = nn.ReLU()
+
+        self.bn1 = nn.BatchNorm1d(512)
+        self.bn2 = nn.BatchNorm1d(768)
+        # self.bn3 = nn.BatchNorm1d(768)
+
+    def forward(self, x):
+        B, P, N, C = x.shape
+        x = x.reshape(B * P, N, C)
+        c = x.mean(1, keepdims=True)
+        x = x - c
+        xyz = x.transpose(2, 1)
+        # x_36 = self.raw_point_embed_0(xyz)
+        x_72 = self.raw_point_embed_1(xyz)
+        # x_144 = self.raw_point_embed_2(xyz)
+        x = torch.cat([xyz, x_72], dim = 1)
+        # x = x.transpose(2, 1)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        # x = F.relu(self.bn3(self.conv3(x)))
+        x = torch.max(x, 2, keepdim=True)[0]
+        x = x.squeeze(-1)
+        x = x.reshape(B, P, -1)
+        return x
+
+
 class DGCNN(nn.Module):
     def __init__(self, k, emb_dims):
         super(DGCNN, self).__init__()
         self.k = k
         self.emb_dims = emb_dims // 2
+        # self.posE = PosE()
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(256)
         self.bn3 = nn.BatchNorm1d(self.emb_dims)
+        # self.bn4 = nn.BatchNorm1d(self.emb_dims)
 
         self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=False),
                                    self.bn1,
@@ -62,11 +177,15 @@ class DGCNN(nn.Module):
         self.conv3 = nn.Sequential(nn.Conv1d(320, self.emb_dims, kernel_size=1, bias=False),
                                    self.bn3,
                                    nn.LeakyReLU(negative_slope=0.2))
+        # self.conv4 = nn.Sequential(nn.Conv1d(self.emb_dims * 2, self.emb_dims, kernel_size=1, bias=False),
+        #                            self.bn4,
+        #                            nn.LeakyReLU(negative_slope=0.2))
 
     def forward(self, x):  # [batch_size, patch_num, 32, 3]
         batch_size, patch_num, num_points, dims = x.shape
         x = x.reshape(batch_size * patch_num, num_points, dims)
         x = x.permute(0, 2, 1)  # [batch_size*patch_num, 3, 32], batch_size*patch_num denotes as batch_size following
+        # x = self.posE(x)
 
         x = get_graph_feature(x, k=self.k)  # (batch_size, 3, num_points) -> (batch_size, 3*2, num_points, k)
         x = self.conv1(x)  # (batch_size, 3*2, num_points, k) -> (batch_size, 64, num_points, k)
@@ -82,6 +201,7 @@ class DGCNN(nn.Module):
         x1 = F.adaptive_max_pool1d(x, 1)  # (batch_size, emb_dims, num_points) -> (batch_size, emb_dims, 1)
         x2 = F.adaptive_avg_pool1d(x, 1)  # (batch_size, emb_dims, num_points) -> (batch_size, emb_dims, 1)
         x = torch.cat((x1, x2), dim=1)
+        # x = self.conv4(x)
 
         x = x.view(batch_size, patch_num, -1)
 
@@ -109,12 +229,13 @@ class fc_layer(nn.Module):
             )
 
     def forward(self, x):
+        # x = l2_norm(x, 1)
         x = self.fc(x)
         return x
 
 
 class Classifier(nn.Module):
-    def __init__(self, input_dim, num_class=10):
+    def __init__(self, input_dim, num_class):
         super(Classifier, self).__init__()
 
         self.mlp1 = fc_layer(input_dim, 512, bias=True, activation='leakyrelu', bn=True)
@@ -125,6 +246,7 @@ class Classifier(nn.Module):
 
     def forward(self, x):
         x = self.dp1(self.mlp1(x))
+        # print('weight: ', self.mlp1.fc[0].weight)
         x2 = self.dp2(self.mlp2(x))
         logits = self.mlp3(x2)
         return logits
@@ -134,13 +256,18 @@ class Projector_img(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(Projector_img, self).__init__()
 
-        self.mlp1 = fc_layer(7680, 512, bias=True, activation='leakyrelu', bn=True)
+        self.mlp1 = fc_layer(input_dim * 10, 512, bias=True, activation='leakyrelu', bn=True)
         self.dp1 = nn.Dropout(p=0.5)
         self.mlp2 = fc_layer(512, output_dim)
 
     def forward(self, x):
         x = x[:, 0, :] # [B*10, 768]
+        # x = x @ self.proj  # [B*10, output_dim_img]
+
+        # x = x / x.norm(dim=-1, keepdim=True)
+
         x = x.reshape(-1, 10 * 768)
+
         x = self.dp1(self.mlp1(x))
         x2 = self.mlp2(x)
         return x2
@@ -155,7 +282,12 @@ class Projector_pc(nn.Module):
         self.mlp2 = fc_layer(512, output_dim)
 
     def forward(self, x):
+        # print(x.shape)
         x = x[:, 0, :] # [B, 768]
+        # x = x @ self.proj  # [B, output_dim_pc]
+
+        # x = x / x.norm(dim=-1, keepdim=True)
+
         x = self.dp1(self.mlp1(x))
         x2 = self.mlp2(x)
         return x2
@@ -217,7 +349,7 @@ class TeacherModel(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, args=None):
         super().__init__()
 
         # ---------------------------MAE encoder specifics-------------------------
@@ -225,6 +357,8 @@ class TeacherModel(nn.Module):
         self.blocks = nn.ModuleList([
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(depth)])
+        # for i in range(depth):
+        #     self.blocks[i] = self.blocks[i].half()
 
         self.embed_dim = embed_dim
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)#.half()
@@ -236,9 +370,9 @@ class TeacherModel(nn.Module):
         # --------------------------------------------------------------------------
 
         self.projector_img = Projector_img(embed_dim, 512)
-        self.classifier_img = Classifier(512, 10)
+        self.classifier_img = Classifier(512, args.num_cls)
         self.norm_pix_loss = norm_pix_loss
-        # self.criterion_ce = SmoothCrossEntropy()
+        # self.criterion_ce = SmoothCrossEntropy()#torch.nn.CrossEntropyLoss() # FocalLoss() #
         self.criterion_ce = torch.nn.CrossEntropyLoss()
         self.train_layer = 3
 
@@ -277,8 +411,9 @@ class TeacherModel(nn.Module):
         for i in range(self.train_layer):
             x = self.blocks[12-self.train_layer+i](x)
         x = self.norm(x)
+        # x = x.to(torch.float32)
 
-        return x
+        return x  # , mask, ids_restore
 
     def forward(self, imgs, label=-1, mode='train', mask_ratio=0.75):
 
@@ -308,7 +443,7 @@ class StudentModel(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, args=None):
         super().__init__()
 
         # ---------------------------MAE encoder specifics-------------------------
@@ -339,8 +474,7 @@ class StudentModel(nn.Module):
         # --------------------------------------------------------------------------
 
         self.projector_pc = Projector_pc(embed_dim, 512)  # (1536, 512)
-        self.classifier_pc = Classifier(512, 10)
-        # self.criterion_ce = SmoothCrossEntropy()
+        self.classifier_pc = Classifier(512, args.num_cls)
         self.criterion_ce = torch.nn.CrossEntropyLoss()
         self.initialize_weights()
 
@@ -392,9 +526,14 @@ class StudentModel(nn.Module):
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
+        # can not use torch.no_grad here, as the grad needs to backward to pc_patch_embed.
+        # apply Transformer blocks (parameters frozen)
         for blk in self.blocks:
             x = blk(x)
+        # for blk in self.pc_blocks:
+        #     x = blk(x)
         x = self.pc_norm(x)  # [B*10, 197, 768]
+        # x = self.projector_share(x)
 
         return x  # , mask, ids_restore
 
@@ -464,9 +603,10 @@ class StudentModel(nn.Module):
             pred = self.forward_decoder_pc(latent_pc, latent_img, ids_restore_pc, pc_decoder_pos_embed)
 
             loss_re = self.forward_loss_pc(pc_patches, pred, mask_pc, logits_pc, label)
+            # loss_align = torch.tensor(0.0)
 
             criterion_aign = nn.KLDivLoss(reduction="batchmean", log_target=True)
-            loss_align = criterion_aign(F.log_softmax(logits_pc, dim=1), F.log_softmax(logits_img, dim=1))
+            loss_align = criterion_aign(F.log_softmax(logits_pc, dim=1), F.log_softmax(logits_img, dim=1)) 
 
             return loss_re, loss_ce, 2 * loss_align
 
@@ -475,6 +615,7 @@ class StudentModel(nn.Module):
             pc_feat = self.projector_pc(latent_all_pc)
             logits_pc = self.classifier_pc(pc_feat)
             loss_ce = self.criterion_ce(logits_pc, label)
+            # loss_align = torch.tensor(0.0)
             criterion_aign = nn.KLDivLoss(reduction="batchmean", log_target=True)
             loss_align = criterion_aign(F.log_softmax(logits_pc, dim=1), F.log_softmax(logits_img, dim=1)) 
 
@@ -500,4 +641,3 @@ def mae_vit_base_patch16_dec512d8b_pc(**kwargs):
 # set recommended archs
 mae_vit_base_patch16_img = mae_vit_base_patch16_dec512d8b_img  # decoder: 512 dim, 8 blocks
 mae_vit_base_patch16_pc = mae_vit_base_patch16_dec512d8b_pc  # decoder: 512 dim, 8 blocks
-

@@ -2,19 +2,17 @@ import torch
 import numpy
 import random
 import sklearn.metrics as metrics
-import torch.nn as nn
-
-from datasets.dataloader import ModelNet, ScanNet, ShapeNet
+from datasets.dataloader_so import ModelNet11, ScanObjectNet11, ShapeNet9, ScanObjectNet9
 import numpy as np
 from torch.utils.data.sampler import SubsetRandomSampler
 from torchsampler import ImbalancedDatasetSampler
 import torch.optim as optim
 from trainers.mv_utils_zs import Realistic_Projection
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 import argparse
 from utils import log, checkpoints
 from tqdm import tqdm
-from trainers import model
+from trainers import model_so
 from utils.pos_embed import interpolate_pos_embed
 
 
@@ -36,18 +34,15 @@ def split_set(dataset, domain, set_type="source"):
     io.cprint("Occurrences count of classes in " + set_type + " " + domain +
               " validation part: " + str(dict(zip(unique, counts))))
     # Creating PT data samplers and loaders:
-    if args.src_dataset == 'shapenet' or args.src_dataset == 'scannet':
-        train_sampler = ImbalancedDatasetSampler(dataset, labels=dataset.label[train_indices], indices=train_indices)
-        valid_sampler = SubsetRandomSampler(val_indices)
-    else:
-        train_sampler = SubsetRandomSampler(train_indices)
-        valid_sampler = SubsetRandomSampler(val_indices)
+    # train_sampler = SubsetRandomSampler(train_indices)
+    train_sampler = ImbalancedDatasetSampler(dataset, labels=dataset.label[train_indices], indices=train_indices)
+    valid_sampler = SubsetRandomSampler(val_indices)
     return train_sampler, valid_sampler
 
 
-def load_mae_to_cpu():
-    img_model = model.__dict__['mae_vit_base_patch16_img'](norm_pix_loss=False)
-    pc_model = model.__dict__['mae_vit_base_patch16_pc'](norm_pix_loss=False)
+def load_mae_to_cpu(args):
+    img_model = model_so.__dict__['mae_vit_base_patch16_img'](norm_pix_loss=False, args=args)
+    pc_model = model_so.__dict__['mae_vit_base_patch16_pc'](norm_pix_loss=False, args=args)
 
     checkpoint = torch.load('./pretrained/mae_finetuned_vit_base.pth', map_location='cpu')
     checkpoint_model = checkpoint['model']
@@ -90,6 +85,7 @@ class Trainer:
         # Image features
         if mode == 'train':
             if role == 'teacher':
+                # self.pc_model.eval()
                 loss_ce_img, latent_all_img, logits_img = self.img_model(images, label, mode)
                 loss_re, loss_ce_pc, loss_align = self.pc_model(pc_patches, latent_all_img, logits_img.detach(), label, mode)
                 loss_ce = loss_ce_img + loss_ce_pc
@@ -111,9 +107,9 @@ class Trainer:
         self.optimizer_pc.zero_grad()
         pc, pc_patch, label = data[0].cuda(), data[1].cuda(), data[2].cuda()
         loss_re, loss_ce, loss_align = self.model_forward(pc, pc_patch, label, role = 'teacher', mode='train')
-        loss = loss_re + loss_ce + loss_align
+        loss = loss_ce  # + loss_re + loss_align
         if domain == 'target':
-            loss = loss_re + loss_align
+            loss = loss_re * 0.0  # + loss_align
         loss.backward()
         self.optimizer_img.step()
         self.optimizer_pc.step()
@@ -124,9 +120,9 @@ class Trainer:
         self.optimizer_pc.zero_grad()
         pc, pc_patch, label = data[0].cuda(), data[1].cuda(), data[2].cuda()
         loss_re, loss_ce, loss_align = self.model_forward(pc, pc_patch, label, role = 'student', mode='train')
-        loss = loss_re + loss_ce + loss_align
+        loss = loss_ce  # + loss_re + loss_align
         if domain == 'target':
-            loss = loss_re + loss_align
+            loss = loss_re * 0.0  # + loss_align
         loss.backward()
         self.optimizer_pc.step()
         return loss_re.item(), loss_ce.item(), loss_align.item()
@@ -173,11 +169,11 @@ class Trainer:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='DA on Point Clouds')
-    parser.add_argument('--exp_name', type=str, default='m2r', help='Name of the experiment')
+    parser.add_argument('--exp_name', type=str, default='onlineKD_new', help='Name of the experiment')
     parser.add_argument('--out_path', type=str, default='./experiments', help='log folder path')
-    parser.add_argument('--dataroot', type=str, default='/cluster/sc_download/zhuwanru', metavar='N', help='data path')
-    parser.add_argument('--src_dataset', type=str, default='modelnet', choices=['modelnet', 'shapenet', 'scannet'])
-    parser.add_argument('--trgt_dataset', type=str, default='scannet', choices=['modelnet', 'shapenet', 'scannet'])
+    parser.add_argument('--dataroot', type=str, default='../..', metavar='N', help='data path')
+    parser.add_argument('--src_dataset', type=str, default='modelnet11', choices=['modelnet11', 'shapenet9'])
+    parser.add_argument('--trgt_dataset', type=str, default='scanobjectnn11', choices=['scanobjectnn11', 'scanobjectnn9'])
     parser.add_argument('--epochs', type=int, default=400, help='number of episode to train')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
     parser.add_argument('--gpus', type=lambda s: [int(item.strip()) for item in s.split(',')], default='0',
@@ -187,14 +183,18 @@ if __name__ == '__main__':
     parser.add_argument('--test_batch_size', type=int, default=32, metavar='batch_size',
                         help='Size of test batch per domain')
     parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
+    parser.add_argument('--momentum', type=float, default=0.9, help='SGD momentum')
     parser.add_argument('--wd', type=float, default=5e-5, help='weight decay')
+    parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
 
     args = parser.parse_args()
 
     io = log.IOStream(args)
+    io.cprint(args.lr)
+    io.cprint(args.wd)
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)  # to get the same point choice in ModelNet and ScanNet leave it fixed
+    random.seed(1)
+    np.random.seed(1)  # to get the same point choice in ModelNet and ScanNet leave it fixed
     torch.manual_seed(args.seed)
     args.cuda = (args.gpus[0] >= 0) and torch.cuda.is_available()
     device = torch.device("cuda:" + str(args.gpus[0]) if args.cuda else "cpu")
@@ -210,7 +210,12 @@ if __name__ == '__main__':
 
     src_dataset = args.src_dataset
     trgt_dataset = args.trgt_dataset
-    data_func = {'modelnet': ModelNet, 'scannet': ScanNet, 'shapenet': ShapeNet}
+    if src_dataset == 'modelnet11':
+        args.num_cls = 11
+    else:
+        args.num_cls = 9
+    data_func = {'modelnet11': ModelNet11, 'scanobjectnn11': ScanObjectNet11,
+                 'shapenet9': ShapeNet9, 'scanobjectnn9': ScanObjectNet9}
 
     src_train_dataset = data_func[src_dataset](io, args.dataroot, 'train')
     src_test_dataset = data_func[src_dataset](io, args.dataroot, 'test')
@@ -219,17 +224,17 @@ if __name__ == '__main__':
 
     src_train_sampler, src_valid_sampler = split_set(src_train_dataset, src_dataset, "source")
 
-    src_train_loader = torch.utils.data.DataLoader(src_train_dataset, batch_size=args.batch_size, num_workers=4,
+    src_train_loader = torch.utils.data.DataLoader(src_train_dataset, batch_size=args.batch_size, num_workers=8,
                                                    sampler=src_train_sampler, drop_last=True)
-    src_val_loader = torch.utils.data.DataLoader(src_train_dataset, batch_size=args.batch_size, num_workers=4,
+    src_val_loader = torch.utils.data.DataLoader(src_train_dataset, batch_size=args.batch_size, num_workers=8,
                                                  sampler=src_valid_sampler)
-    src_test_loader = torch.utils.data.DataLoader(src_test_dataset, batch_size=args.batch_size, num_workers=4)
+    src_test_loader = torch.utils.data.DataLoader(src_test_dataset, batch_size=args.batch_size, num_workers=8)
 
-    trgt_train_loader = torch.utils.data.DataLoader(trgt_train_dataset, batch_size=args.batch_size, num_workers=4,
+    trgt_train_loader = torch.utils.data.DataLoader(trgt_train_dataset, batch_size=args.batch_size, num_workers=8,
                                                     drop_last=True)
-    trgt_test_loader = torch.utils.data.DataLoader(trgt_test_dataset, batch_size=args.batch_size, num_workers=4)
+    trgt_test_loader = torch.utils.data.DataLoader(trgt_test_dataset, batch_size=args.batch_size, num_workers=8)
 
-    img_model, pc_model = load_mae_to_cpu()
+    img_model, pc_model = load_mae_to_cpu(args)
 
     need_frozend_layers = ['cls_token', 'pos_embed', 'patch_embed.proj.weight', 'patch_embed.proj.bias']
     for param in img_model.named_parameters():
@@ -241,7 +246,6 @@ if __name__ == '__main__':
 
     img_model = img_model.to(device)
     pc_model = pc_model.to(device)
-
     optimizer_img = optim.Adam(filter(lambda p: p.requires_grad, img_model.parameters()), lr=args.lr, weight_decay=args.wd)
     scheduler_img = CosineAnnealingLR(optimizer_img, args.epochs)
     optimizer_pc = optim.Adam(filter(lambda p: p.requires_grad, pc_model.parameters()), lr=args.lr, weight_decay=args.wd)
@@ -252,8 +256,8 @@ if __name__ == '__main__':
     checkpoint_io_img = checkpoints.CheckpointIO(checkpoint_dir, model=img_model, optimizer=optimizer_img)
     checkpoint_io_pc = checkpoints.CheckpointIO(checkpoint_dir, model=pc_model, optimizer=optimizer_pc)
     try:
-        load_dict_img = checkpoint_io_img.load('model_img_200.pt')
-        load_dict_pc = checkpoint_io_pc.load('model_pc_200.pt')
+        load_dict_img = checkpoint_io_img.load('model_img.pt')
+        load_dict_pc = checkpoint_io_pc.load('model_pc.pt')
     except FileExistsError:
         load_dict_img = dict()
         load_dict_pc = dict()
@@ -261,6 +265,8 @@ if __name__ == '__main__':
     batch_it = load_dict_img.get('batch_it', -1)
     src_metric_val_best = 0.0
 
+    # trgt_metric_test = trainer.model_eval_img_pc(trgt_test_loader, io)
+    # raise error
     while True:
         src_loss_re_sum = 0.0
         src_loss_ce_sum = 0.0
@@ -271,32 +277,47 @@ if __name__ == '__main__':
         epoch_it += 1
         if epoch_it > args.epochs:
             break
-        for src_batch, trgt_batch in tqdm(zip(src_train_loader, trgt_train_loader)):
+        for src_batch, trgt_batch in zip(src_train_loader, trgt_train_loader):
             batch_it += 1
             it += 1
-
-            if epoch_it % 10 < 5:  # update teacher
-                src_loss_re, src_loss_ce, src_loss_align = trainer.model_train_teacher(src_batch, domain='source')
-                trgt_loss_re, _, _ = trainer.model_train_teacher(trgt_batch, domain='target')
-            else:  # update student
-                src_loss_re, src_loss_ce, src_loss_align = trainer.model_train_student(src_batch, domain='source')
-                trgt_loss_re, _, _ = trainer.model_train_student(trgt_batch, domain='target')
-
+            src_loss_re, src_loss_ce, src_loss_align = trainer.model_train_teacher(src_batch, domain='source')
+            trgt_loss_re, _, _ = trainer.model_train_teacher(trgt_batch, domain='target')
             src_loss_ce_sum += src_loss_ce
             src_loss_re_sum += src_loss_re
             src_loss_align_sum += src_loss_align
             trgt_loss_re_sum += trgt_loss_re
+            src_loss_re, src_loss_ce, src_loss_align = trainer.model_train_student(src_batch, domain='source')
+            trgt_loss_re, _, _ = trainer.model_train_student(trgt_batch, domain='target')
+            src_loss_ce_sum += src_loss_ce
+            src_loss_re_sum += src_loss_re
+            src_loss_align_sum += src_loss_align
+            trgt_loss_re_sum += trgt_loss_re
+
+            # if epoch_it % 10 < 5:  # update teacher
+            #     src_loss_re, src_loss_ce, src_loss_align = trainer.model_train_teacher(src_batch, domain='source')
+            #     trgt_loss_re, _, _ = trainer.model_train_teacher(trgt_batch, domain='target')
+            # else:  # update student
+            #     src_loss_re, src_loss_ce, src_loss_align = trainer.model_train_student(src_batch, domain='source')
+            #     trgt_loss_re, _, _ = trainer.model_train_student(trgt_batch, domain='target')
+            # src_loss_ce_sum += src_loss_ce
+            # src_loss_re_sum += src_loss_re
+            # src_loss_align_sum += src_loss_align
+            # trgt_loss_re_sum += trgt_loss_re
+
         scheduler_img.step()
         scheduler_pc.step()
         if epoch_it % 10 == 0:
             checkpoint_io_img.save('model_img_new.pt', epoch_it=epoch_it, batch_it=batch_it)
             checkpoint_io_pc.save('model_pc_new.pt', epoch_it=epoch_it, batch_it=batch_it)
+        if epoch_it == 200:
+            checkpoint_io_img.save('model_img_200.pt', epoch_it=epoch_it, batch_it=batch_it)
+            checkpoint_io_pc.save('model_pc_200.pt', epoch_it=epoch_it, batch_it=batch_it)
 
-        io.cprint('lr_rate=%.9f' % scheduler_pc.get_last_lr()[0])
+        io.cprint('lr_rate=%.9f' % scheduler_img.get_last_lr()[0])
         io.cprint('Train -SRC - [Epoch %02d], loss_re=%.4f, loss_ce=%.4f, loss_align=%.4f' %
                   (epoch_it, src_loss_re_sum / it, src_loss_ce_sum / it, src_loss_align_sum / it))
         io.cprint('Train -TRT - [Epoch %02d], loss_re=%.4f' % (epoch_it, trgt_loss_re_sum / it))
 
-        # Run validation
-        src_metric_val = trainer.model_eval_img_pc(src_val_loader, io)
+        # # Run validation
+        # src_metric_val = trainer.model_eval(src_val_loader, io)
         trgt_metric_test = trainer.model_eval_img_pc(trgt_test_loader, io)
