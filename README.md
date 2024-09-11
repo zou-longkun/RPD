@@ -4,7 +4,7 @@
 
 
 This repo is a PyTorch implementation for **Boosting Cross-Domain Point Classification via Distilling Relational Priors from 2D Transformers**
-[Paper]()
+[Paper](https://arxiv.org/abs/2407.18534)
 ## Requirements
 The code has been tested with
 
@@ -48,6 +48,18 @@ python main_spst.py --exp_name 'spst' --trgt_dataset scannet --dataroot [your_da
 ```
 
 If you want to test with pre-trained model, download it from [here](https://drive.google.com/file/d/1xV3XObyOOwHJ_dwiP4u-9ZSQMbiUY9lc/view?usp=sharing) and place it at `experiments/`
+
+## Citation
+Please cite this paper if you want to use it in your work,
+```
+@article{zou2024boosting,
+  title={Boosting Cross-Domain Point Classification via Distilling Relational Priors from 2D Transformers},
+  author={Zou, Longkun and Zhu, Wanru and Chen, Ke and Guo, Lihua and Guo, Kailing and Jia, Kui and Wang, Yaowei},
+  journal={IEEE Transactions on Circuits and Systems for Video Technology},
+  year={2024},
+  publisher={IEEE}
+}
+```
 
 ## Acknowlegment
 This repo benefits from [PointCLIP_V2](https://github.com/yangyangyang127/PointCLIP_V2), [MAE](https://github.com/facebookresearch/mae), [GAST](https://github.com/zou-longkun/GAST). Thanks for their wonderful works.
